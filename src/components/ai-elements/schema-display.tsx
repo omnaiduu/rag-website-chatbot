@@ -1,12 +1,12 @@
 "use client";
 
-import { Badge } from "#/components/ui/badge";
+import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "#/components/ui/collapsible";
-import { cn } from "#/lib/utils";
+} from "@/components/ui/collapsible";
+import { cn } from "@/lib/utils";
 import { ChevronRightIcon } from "lucide-react";
 import type { ComponentProps, HTMLAttributes } from "react";
 import { createContext, useContext, useMemo } from "react";
@@ -102,12 +102,13 @@ export const SchemaDisplayPath = ({
     /\{([^}]+)\}/g,
     '<span class="text-blue-600 dark:text-blue-400">{$1}</span>'
   );
+  const html = typeof children === "string" ? children : highlightedPath;
 
   return (
     <span
       className={cn("font-mono text-sm", className)}
       // oxlint-disable-next-line eslint-plugin-react(no-danger)
-      dangerouslySetInnerHTML={{ __html: children ?? highlightedPath }}
+      dangerouslySetInnerHTML={{ __html: html }}
       {...props}
     />
   );

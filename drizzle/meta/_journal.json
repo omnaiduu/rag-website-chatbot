@@ -8,6 +8,20 @@
       "when": 1773554836177,
       "tag": "0000_good_rogue",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1773554836178,
+      "tag": "0001_add_source_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773554836179,
+      "tag": "0002_drop_source_url",
+      "breakpoints": true
     }
   ]
 }
