@@ -47,9 +47,11 @@ COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 
 ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # Build Next.js application
-RUN export DATABASE_URL=postgres://placeholder:placeholder@localhost:5432/placeholder \
+RUN --mount=type=cache,target=/app/.next/cache \
+  export DATABASE_URL=postgres://placeholder:placeholder@localhost:5432/placeholder \
     GROQ_API_KEY=placeholder \
     COHERE_API_KEY=placeholder \
     GROQ_MODEL=placeholder-model && \
@@ -68,6 +70,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=5000
 ENV HOSTNAME=0.0.0.0
+ENV NEXT_TELEMETRY_DISABLED=1
 
 # Copy production assets
 COPY --from=builder --chown=node:node /app/public ./public
