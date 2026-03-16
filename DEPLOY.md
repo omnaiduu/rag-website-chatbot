@@ -4,8 +4,7 @@ This project is configured for a production multi-stage Docker image using Next.
 
 Lockfile behavior in Docker build:
 
-- If `bun.lock` exists, Docker uses Bun (`bun install --frozen-lockfile`).
-- Otherwise it falls back to npm/yarn/pnpm based on detected lockfile.
+- Docker uses Bun only (`bun install --frozen-lockfile`).
 - Runtime container is still Node.js.
 
 ## 1) Set production environment variables
@@ -112,16 +111,10 @@ Fill `.env` with real values for:
 
 ### Step 2: Install dependencies
 
-With Bun (recommended):
+With Bun:
 
 ```bash
 bun install
-```
-
-With npm:
-
-```bash
-npm install
 ```
 
 ### Step 3: Run in development mode
@@ -130,12 +123,6 @@ With Bun:
 
 ```bash
 bun run dev
-```
-
-With npm:
-
-```bash
-npm run dev
 ```
 
 Open:
@@ -149,13 +136,6 @@ With Bun:
 ```bash
 bun run build
 PORT=5000 bun run start
-```
-
-With npm:
-
-```bash
-npm run build
-PORT=5000 npm run start
 ```
 
 Open:
@@ -208,7 +188,7 @@ Do not commit this token to any file in the repository.
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GHCR_OWNER" --password-stdin
 ```
 
-### Step 4: Build and tag for GHCR (multi-arch: AMD64 + ARM64)
+### Step 4: Build and tag for GHCR (ARM64 only)
 
 Initialize buildx once (if not already configured):
 
@@ -217,11 +197,11 @@ docker buildx create --name multiarch-builder --use || docker buildx use multiar
 docker buildx inspect --bootstrap
 ```
 
-Build and push a multi-architecture image manifest:
+Build and push ARM64 image:
 
 ```bash
 docker buildx build \
-  --platform linux/amd64,linux/arm64 \
+  --platform linux/arm64 \
   -t ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:$GHCR_TAG \
   -t ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:latest \
   --push \
@@ -260,17 +240,9 @@ docker run -d \
   ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:latest
 ```
 
-If you still need to force architecture manually, add:
-
-```bash
---platform linux/arm64
-```
-
-to `docker run`.
-
 ## Notes
 
 - Container listens on port 5000 (`PORT=5000` in `Dockerfile`).
 - App environment variables are injected at runtime from `.env`.
 - Never commit `.env` to git.
-- For ARM production machines, publish and pull multi-arch images (`linux/amd64,linux/arm64`) using buildx.
+- For ARM production machines, publish ARM64 images (`linux/arm64`) using buildx.

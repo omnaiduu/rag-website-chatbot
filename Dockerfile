@@ -8,33 +8,24 @@
 ARG NODE_VERSION=24.13.0-slim
 ARG BUN_VERSION=1.2.8
 
+FROM oven/bun:${BUN_VERSION} AS bun
+
 FROM node:${NODE_VERSION} AS dependencies
 
 # Set working directory
 WORKDIR /app
 
-# Install Bun for lockfile-aware installs when bun.lock is present.
-RUN npm install -g bun@${BUN_VERSION}
+# Install Bun by copying the official binary (no npm usage).
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
 # Copy package-related files first to leverage Docker's caching mechanism
-COPY package.json bun.lock* yarn.lock* package-lock.json* pnpm-lock.yaml* .npmrc* ./
+COPY package.json bun.lock* .npmrc* ./
 
 # Install project dependencies with frozen lockfile for reproducible builds
 RUN --mount=type=cache,target=/root/.npm \
-    --mount=type=cache,target=/usr/local/share/.cache/yarn \
-    --mount=type=cache,target=/root/.local/share/pnpm/store \
     --mount=type=cache,target=/root/.bun/install/cache \
-  if [ -f bun.lock ]; then \
-    bun install --frozen-lockfile; \
-  elif [ -f package-lock.json ]; then \
-    npm ci --no-audit --no-fund; \
-  elif [ -f yarn.lock ]; then \
-    corepack enable yarn && yarn install --frozen-lockfile --production=false; \
-  elif [ -f pnpm-lock.yaml ]; then \
-    corepack enable pnpm && pnpm install --frozen-lockfile; \
-  else \
-    echo "No lockfile found." && exit 1; \
-  fi
+  bun install --frozen-lockfile
 
 # ============================================
 # Stage 2: Build Next.js application in standalone mode
@@ -45,8 +36,9 @@ FROM node:${NODE_VERSION} AS builder
 # Set working directory
 WORKDIR /app
 
-# Install Bun for build command when bun.lock is present.
-RUN npm install -g bun@${BUN_VERSION}
+# Install Bun by copying the official binary (no npm usage).
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=bun /usr/local/bin/bunx /usr/local/bin/bunx
 
 # Copy project dependencies from dependencies stage
 COPY --from=dependencies /app/node_modules ./node_modules
@@ -61,17 +53,7 @@ RUN export DATABASE_URL=postgres://placeholder:placeholder@localhost:5432/placeh
     GROQ_API_KEY=placeholder \
     COHERE_API_KEY=placeholder \
     GROQ_MODEL=placeholder-model && \
-  if [ -f bun.lock ]; then \
-    bun run build; \
-  elif [ -f package-lock.json ]; then \
-    npm run build; \
-  elif [ -f yarn.lock ]; then \
-    corepack enable yarn && yarn build; \
-  elif [ -f pnpm-lock.yaml ]; then \
-    corepack enable pnpm && pnpm build; \
-  else \
-    echo "No lockfile found." && exit 1; \
-  fi
+  bun run build
 
 # ============================================
 # Stage 3: Run Next.js application
