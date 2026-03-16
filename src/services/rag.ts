@@ -1,25 +1,20 @@
-import { CohereClient } from 'cohere-ai'
-import type { EmbedByTypeResponse } from 'cohere-ai/api'
-import { cosineDistance } from 'drizzle-orm'
+import { cohere } from '@ai-sdk/cohere'
+import { embed, rerank } from 'ai'
+import { cosineDistance, sql } from 'drizzle-orm'
 
 import { db } from '@/db'
 import { documentChunks } from '@/schema'
 
 const EMBEDDING_MODEL = 'embed-v4.0'
-const RERANK_MODEL = 'rerank-v3.5'
+const RERANK_MODEL = 'rerank-v4.0-pro'
 const EMBEDDING_DIMENSIONS = 512
-const MIN_RERANK_SCORE = 0.15
+const MIN_RERANK_SCORE = 0.28
+const MAX_VECTOR_DISTANCE = 0.82
+const RERANK_FALLBACK_MIN_RESULTS = 3
+const MAX_CONTEXT_CHARS = 5_000
+const MAX_CHUNK_CHARS_IN_CONTEXT = 850
 
-function resolveApiKey(...values: Array<string | undefined>) {
-  for (const value of values) {
-    const normalized = value?.trim()
-    if (normalized && !normalized.startsWith('$')) {
-      return normalized
-    }
-  }
-
-  return undefined
-}
+const PREVIEW_QUERY_CHARS = 120
 
 export type RetrievedChunk = {
   id: string
@@ -27,56 +22,39 @@ export type RetrievedChunk = {
   pageTitle: string | null
   chunkText: string
   createdAt: Date | null
+  vectorDistance: number
   similarity: number
   rerankScore?: number
 }
 
-function createCohereClient() {
-  const token = resolveApiKey(process.env.cohere, process.env.COHERE_API_KEY)
-  if (!token) {
-    throw new Error('Missing Cohere API key. Set COHERE_API_KEY or cohere in your environment.')
-  }
-
-  return new CohereClient({ token })
-}
-
-function getFloatEmbeddings(response: EmbedByTypeResponse | { body: EmbedByTypeResponse }): number[][] {
-  const payload = 'body' in response ? response.body : response
-  const embeddings = payload.embeddings
-
-  if (!Array.isArray(embeddings?.float)) {
-    throw new Error('Cohere response does not include float embeddings')
-  }
-
-  return embeddings.float
-}
-
-function getRerankResults(response: { results: Array<{ index: number; relevanceScore: number }> } | { body: { results: Array<{ index: number; relevanceScore: number }> } }) {
-  return 'body' in response ? response.body.results : response.results
-}
-
 export async function generateQueryEmbedding(query: string): Promise<number[]> {
-  const cohere = createCohereClient()
-
-  const response = await cohere.v2.embed({
-    model: EMBEDDING_MODEL,
-    inputType: 'search_query',
-    embeddingTypes: ['float'],
-    outputDimension: EMBEDDING_DIMENSIONS,
-    texts: [query],
+  const { embedding } = await embed({
+    model: cohere.embedding(EMBEDDING_MODEL),
+    value: query,
+    providerOptions: {
+      cohere: {
+        inputType: 'search_query',
+        outputDimension: EMBEDDING_DIMENSIONS,
+      },
+    },
   })
 
-  const embeddings = getFloatEmbeddings(response)
-  const first = embeddings[0]
-
-  if (!first) {
+  if (!embedding || embedding.length === 0) {
     throw new Error('Failed to generate embedding for query.')
   }
 
-  return first
+  return embedding
 }
 
-export async function searchByEmbedding(embedding: number[], limit = 30): Promise<RetrievedChunk[]> {
+function createRetrievalTraceId(): string {
+  return Math.random().toString(36).slice(2, 10)
+}
+
+export async function searchByEmbedding(
+  embedding: number[],
+  limit = 30,
+  traceId?: string,
+): Promise<RetrievedChunk[]> {
   const distance = cosineDistance(documentChunks.embedding, embedding)
 
   const rows = await db
@@ -89,8 +67,23 @@ export async function searchByEmbedding(embedding: number[], limit = 30): Promis
       distance,
     })
     .from(documentChunks)
+    .where(sql`${distance} <= ${MAX_VECTOR_DISTANCE}`)
     .orderBy(distance)
     .limit(limit)
+
+  const minDistance = rows.length > 0 ? Math.min(...rows.map((row) => Number(row.distance))) : null
+  const maxDistance = rows.length > 0 ? Math.max(...rows.map((row) => Number(row.distance))) : null
+  const topDistances = rows.slice(0, 5).map((row) => Number(row.distance).toFixed(4))
+
+  console.log('[rag] vector search', {
+    traceId,
+    requestedLimit: limit,
+    distanceThreshold: MAX_VECTOR_DISTANCE,
+    retrieved: rows.length,
+    minDistance,
+    maxDistance,
+    topDistances,
+  })
 
   return rows.map((row) => ({
     id: row.id,
@@ -98,80 +91,177 @@ export async function searchByEmbedding(embedding: number[], limit = 30): Promis
     pageTitle: row.pageTitle,
     chunkText: row.chunkText,
     createdAt: row.createdAt,
+    vectorDistance: Number(row.distance),
     similarity: 1 - Number(row.distance),
   }))
 }
 
-export async function rerankChunks(query: string, chunks: RetrievedChunk[], topN = 8): Promise<RetrievedChunk[]> {
+export async function rerankChunks(query: string, chunks: RetrievedChunk[], topN = 8, traceId?: string): Promise<RetrievedChunk[]> {
   if (chunks.length === 0) {
+    console.log('[rag] rerank skipped: no candidates', { traceId })
     return []
   }
 
-  const cohere = createCohereClient()
-  const response = await cohere.v2.rerank({
-    model: RERANK_MODEL,
+  const { ranking } = await rerank({
+    model: cohere.reranking(RERANK_MODEL),
     query,
-    documents: chunks.map((chunk) => chunk.chunkText),
+    documents: chunks.map((chunk) => [
+      `Title: ${chunk.pageTitle?.trim() || 'Untitled page'}`,
+      `URL: ${chunk.parentUrl}`,
+      '',
+      chunk.chunkText,
+    ].join('\n')),
     topN,
   })
 
-  const results = getRerankResults(response)
-
-  const reranked = results.reduce<RetrievedChunk[]>((accumulator, result) => {
-      const chunk = chunks[result.index]
-      if (!chunk) {
-        return accumulator
-      }
-
-      accumulator.push({
-        ...chunk,
-        rerankScore: result.relevanceScore,
-      })
-
+  const reranked = ranking.reduce<RetrievedChunk[]>((accumulator, item) => {
+    const chunk = chunks[item.originalIndex]
+    if (!chunk) {
       return accumulator
-    }, [])
-
-  const filtered = reranked.filter((chunk) => (chunk.rerankScore ?? 0) >= MIN_RERANK_SCORE)
-  const selected = filtered.length > 0 ? filtered : reranked.slice(0, Math.min(2, reranked.length))
-
-  const seen = new Set<string>()
-  return selected.filter((chunk) => {
-    const signature = chunk.chunkText.slice(0, 220).trim().toLowerCase()
-    if (seen.has(signature)) {
-      return false
     }
 
-    seen.add(signature)
-    return true
+    accumulator.push({
+      ...chunk,
+      rerankScore: item.score,
+    })
+
+    return accumulator
+  }, [])
+
+  const filtered = reranked.filter((chunk) => (chunk.rerankScore ?? 0) >= MIN_RERANK_SCORE)
+  const selected =
+    filtered.length >= RERANK_FALLBACK_MIN_RESULTS
+      ? filtered
+      : reranked.slice(0, Math.min(RERANK_FALLBACK_MIN_RESULTS, reranked.length))
+  const minScore = reranked.length > 0 ? Math.min(...reranked.map((chunk) => chunk.rerankScore ?? 0)) : null
+  const maxScore = reranked.length > 0 ? Math.max(...reranked.map((chunk) => chunk.rerankScore ?? 0)) : null
+  const topScores = reranked.slice(0, 5).map((chunk) => Number(chunk.rerankScore ?? 0).toFixed(4))
+
+  console.log('[rag] rerank summary', {
+    traceId,
+    queryPreview: query.slice(0, PREVIEW_QUERY_CHARS),
+    inputCandidates: chunks.length,
+    rerankResults: reranked.length,
+    minRerankScore: MIN_RERANK_SCORE,
+    minScore,
+    maxScore,
+    topScores,
+    passedScoreFilter: filtered.length,
+    selectedAfterFallback: selected.length,
+    droppedByScore: reranked.length - filtered.length,
   })
+
+  return selected
 }
 
 export async function retrieveRelevantChunks(query: string, candidateLimit = 30, topN = 8): Promise<RetrievedChunk[]> {
-  const embedding = await generateQueryEmbedding(query)
-  const candidates = await searchByEmbedding(embedding, candidateLimit)
+  const traceId = createRetrievalTraceId()
+  const startedAt = Date.now()
 
-  return rerankChunks(query, candidates, topN)
+  console.log('[rag] retrieval start', {
+    traceId,
+    queryPreview: query.slice(0, PREVIEW_QUERY_CHARS),
+    queryLength: query.length,
+    candidateLimit,
+    topN,
+    distanceThreshold: MAX_VECTOR_DISTANCE,
+    minRerankScore: MIN_RERANK_SCORE,
+  })
+
+  const embeddingStartedAt = Date.now()
+  const embedding = await generateQueryEmbedding(query)
+  const embeddingMs = Date.now() - embeddingStartedAt
+
+  const vectorStartedAt = Date.now()
+  const candidates = await searchByEmbedding(embedding, candidateLimit, traceId)
+
+  const vectorSearchMs = Date.now() - vectorStartedAt
+
+  if (candidates.length === 0) {
+    console.log('[rag] retrieval stop', {
+      traceId,
+      stage: 'vector-search',
+      reason: 'no-candidates-after-distance-threshold',
+      distanceThreshold: MAX_VECTOR_DISTANCE,
+      embeddingMs,
+      vectorSearchMs,
+      totalMs: Date.now() - startedAt,
+    })
+
+    return []
+  }
+
+  const rerankStartedAt = Date.now()
+  const reranked = await rerankChunks(query, candidates, topN, traceId)
+  const rerankMs = Date.now() - rerankStartedAt
+
+  if (reranked.length === 0) {
+    console.log('[rag] retrieval stop', {
+      traceId,
+      stage: 'rerank-filter',
+      reason: 'no-candidates-passed-rerank-threshold',
+      minRerankScore: MIN_RERANK_SCORE,
+      embeddingMs,
+      vectorSearchMs,
+      rerankMs,
+      totalMs: Date.now() - startedAt,
+    })
+  }
+
+  console.log('[rag] retrieval done', {
+    traceId,
+    candidateCount: candidates.length,
+    finalChunkCount: reranked.length,
+    embeddingMs,
+    vectorSearchMs,
+    rerankMs,
+    totalMs: Date.now() - startedAt,
+  })
+
+  return reranked
 }
 
 export function buildRagContext(chunks: RetrievedChunk[]): string {
   if (chunks.length === 0) {
+    console.log('[rag] context build: no chunks selected')
     return 'No relevant indexed content was found for this question.'
   }
 
-  return chunks
-    .map((chunk, index) => {
-      const title = chunk.pageTitle?.trim() || 'Untitled page'
-      const score = chunk.rerankScore ?? chunk.similarity
+  const selectedBlocks: string[] = []
+  let currentSize = 0
 
-      return [
-        `Source ${index + 1}`,
-        `URL: ${chunk.parentUrl}`,
-        `Title: ${title}`,
-        `Score: ${score.toFixed(4)}`,
-        chunk.chunkText,
-      ].join('\n')
-    })
-    .join('\n\n---\n\n')
+  for (const [index, chunk] of chunks.entries()) {
+    const title = chunk.pageTitle?.trim() || 'Untitled page'
+    const score = chunk.rerankScore ?? chunk.similarity
+    const trimmedText = chunk.chunkText.slice(0, MAX_CHUNK_CHARS_IN_CONTEXT)
+
+    const block = [
+      `Source ${index + 1}`,
+      `URL: ${chunk.parentUrl}`,
+      `Title: ${title}`,
+      `Score: ${score.toFixed(4)}`,
+      trimmedText,
+    ].join('\n')
+
+    const nextSize = currentSize + block.length
+    if (selectedBlocks.length > 0 && nextSize > MAX_CONTEXT_CHARS) {
+      break
+    }
+
+    selectedBlocks.push(block)
+    currentSize = nextSize
+  }
+
+  const context = selectedBlocks.join('\n\n---\n\n')
+
+  console.log('[rag] context build', {
+    chunksUsed: selectedBlocks.length,
+    maxContextChars: MAX_CONTEXT_CHARS,
+    maxChunkCharsInContext: MAX_CHUNK_CHARS_IN_CONTEXT,
+    contextChars: context.length,
+  })
+
+  return context
 }
 
 export async function getRagContextForQuery(query: string, candidateLimit = 30, topN = 8) {

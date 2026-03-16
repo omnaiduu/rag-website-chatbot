@@ -10,6 +10,7 @@
     "studio": "bunx drizzle-kit studio --port=4983"
   },
   "dependencies": {
+    "@ai-sdk/cohere": "^3.0.25",
     "@ai-sdk/openai-compatible": "^2.0.35",
     "@ai-sdk/react": "^3.0.118",
     "@fontsource-variable/geist": "^5.2.8",
@@ -33,7 +34,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
-    "cohere-ai": "^7.20.0",
     "dotenv": "^17.3.1",
     "drizzle-kit": "^0.31.9",
     "drizzle-orm": "^0.45.1",

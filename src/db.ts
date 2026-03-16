@@ -1,11 +1,6 @@
 
 import { drizzle } from 'drizzle-orm/postgres-js'
-
-const databaseUrl = process.env.DATABASE_URL;
-
-if (!databaseUrl) {
-    throw new Error('DATABASE_URL is not set.');
-}
+import { env } from '@/env'
 
 function withRequiredSsl(url: string): string {
     const parsed = new URL(url);
@@ -15,4 +10,4 @@ function withRequiredSsl(url: string): string {
     return parsed.toString();
 }
 
-export const db = drizzle(withRequiredSsl(databaseUrl));
+export const db = drizzle(withRequiredSsl(env.DATABASE_URL));

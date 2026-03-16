@@ -7,15 +7,17 @@ import { Readability } from '@mozilla/readability'
 import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters'
-import { CohereClient } from 'cohere-ai'
-import type { EmbedByTypeResponse } from 'cohere-ai/api'
+import { cohere } from '@ai-sdk/cohere'
+import { embedMany } from 'ai'
 import { sql } from 'drizzle-orm'
 import { db } from '@/db'
 import { documentChunks } from '@/schema'
 
 const BATCH_SIZE = 50
-const CHUNK_SIZE = 10_000
-const CHUNK_OVERLAP = 500
+const CHUNK_SIZE = 800
+const CHUNK_OVERLAP = 80
+const MIN_CHUNK_CHARS = 180
+const MAX_CHUNK_CHARS = 900
 const EMBEDDING_DIMENSIONS = 512
 const MIN_HTML_LENGTH_FOR_FETCH_ONLY = 1200
 const FETCH_USER_AGENT = 'Mozilla/5.0 (compatible; TanStackStartRAGBot/1.0)'
@@ -197,39 +199,27 @@ function extractMarkdownAndLinks(html: string, pageUrl: string, hostname: string
     }
 }
 
-function getFloatEmbeddings(response: EmbedByTypeResponse | { body: EmbedByTypeResponse }): number[][] {
-    const payload = 'body' in response ? response.body : response
-    const embeddings = payload.embeddings
-
-    if (Array.isArray(embeddings?.float)) {
-        return embeddings.float
-    }
-
-    throw new Error('Cohere response does not include float embeddings')
+function normalizeChunkText(chunk: string): string {
+    return chunk
+        .replace(/\u00A0/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim()
 }
 
-function resolveApiKey(...values: Array<string | undefined>) {
-    for (const value of values) {
-        const normalized = value?.trim()
-        if (normalized && !normalized.startsWith('$')) {
-            return normalized
-        }
-    }
+async function buildChunks(markdown: string, splitter: RecursiveCharacterTextSplitter): Promise<string[]> {
+    const rawChunks = await splitter.splitText(markdown)
 
-    return undefined
+    return rawChunks
+        .map((chunk) => normalizeChunkText(chunk))
+        .filter((chunk) => chunk.length >= MIN_CHUNK_CHARS)
+        .map((chunk) => chunk.slice(0, MAX_CHUNK_CHARS))
 }
 
 const ingest = os
     .input(ingestInputSchema)
     .output(eventIterator(ingestProgressSchema, ingestResultSchema))
     .handler(async function* ({ input, signal, lastEventId }) {
-        const cohereApiKey = resolveApiKey(process.env.cohere, process.env.COHERE_API_KEY)
-        if (!cohereApiKey) {
-            throw new ORPCError('UNAUTHORIZED', {
-                message: 'Missing Cohere API key. Set COHERE_API_KEY or cohere in your environment.',
-            })
-        }
-
         const normalizedRootUrl = input.rootUrl
         const rootHostname = new URL(normalizedRootUrl).hostname
 
@@ -237,9 +227,6 @@ const ingest = os
         const splitter = new RecursiveCharacterTextSplitter({
             chunkSize: CHUNK_SIZE,
             chunkOverlap: CHUNK_OVERLAP,
-        })
-        const cohere = new CohereClient({
-            token: cohereApiKey,
         })
 
         const queue: QueueItem[] = [{ url: normalizedRootUrl, parentUrl: normalizedRootUrl }]
@@ -293,15 +280,17 @@ const ingest = os
             const batch = pendingChunks.splice(0)
             console.log(`[ingest] embedding batch size=${batch.length} reason=${reason}`)
 
-            const embeddingResponse = await cohere.v2.embed({
-                model: 'embed-v4.0',
-                inputType: 'search_document',
-                embeddingTypes: ['float'],
-                outputDimension: EMBEDDING_DIMENSIONS,
-                texts: batch.map((item) => item.chunkText),
+            const { embeddings } = await embedMany({
+                model: cohere.embedding('embed-v4.0'),
+                values: batch.map((item) => item.chunkText),
+                providerOptions: {
+                    cohere: {
+                        inputType: 'search_document',
+                        outputDimension: EMBEDDING_DIMENSIONS,
+                    },
+                },
             })
 
-            const embeddings = getFloatEmbeddings(embeddingResponse)
             if (embeddings.length !== batch.length) {
                 throw new Error(`Embedding count mismatch. expected=${batch.length}, received=${embeddings.length}`)
             }
@@ -412,9 +401,7 @@ const ingest = os
                     continue
                 }
 
-                const chunks = (await splitter.splitText(markdown))
-                    .map((chunk) => chunk.trim())
-                    .filter((chunk) => chunk.length > 0)
+                const chunks = await buildChunks(markdown, splitter)
 
                 if (chunks.length === 0) {
                     console.log(`[ingest] no chunks produced for ${current.url}`)

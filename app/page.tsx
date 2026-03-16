@@ -37,8 +37,10 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import type { IngestProgressEvent, IngestResult, IngestSourceSummary } from './api/rpc/[...path]/route'
 import { rpcClient } from '@/lib/orpc'
+import type { ChatUIMessage } from '@/types/chat'
 import { cn } from '@/lib/utils'
 
 const crawlSchema = z.object({
@@ -130,6 +132,11 @@ function formatProgressStep(event: IngestProgressEvent) {
   return `${stageLabel}: ${event.message}`
 }
 
+function formatSourceScore(score: number) {
+  if (!Number.isFinite(score)) return '0.00'
+  return score.toFixed(2)
+}
+
 function toUiSource(source: IngestSourceSummary): WebsiteSource {
   return {
     id: source.origin,
@@ -168,7 +175,7 @@ export default function Page() {
   const ingestCanceledRef = useRef(false)
   const ingestProgressRef = useRef(0)
 
-  const { messages, sendMessage, status, stop } = useChat({
+  const { messages, sendMessage, status, stop } = useChat<ChatUIMessage>({
     transport: new DefaultChatTransport({
       api: '/api/chat',
     }),
@@ -176,6 +183,7 @@ export default function Page() {
 
   const isThinking = status === 'submitted' || status === 'streaming'
   const isIngesting = ingestState.status === 'running'
+  const latestAssistantMessageId = [...messages].reverse().find((message) => message.role === 'assistant')?.id
 
   const ingestMutation = useMutation({
     mutationFn: (input: { rootUrl: string; maxPages: number }) => rpcClient.ingest(input),
@@ -518,9 +526,9 @@ export default function Page() {
                       <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
                         <div className="h-full rounded-full bg-foreground/80 transition-all" style={{ width: `${Math.max(3, ingestState.progress)}%` }} />
                       </div>
-                      <p className="mt-2 text-xs text-muted-foreground">{ingestState.progress}% complete</p>
-                      <p className="mt-2 text-xs text-muted-foreground">{ingestState.step}</p>
-                      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+                      <p className="mt-2 text-xs text-muted-foreground tabular-nums">{ingestState.progress}% complete</p>
+                      <p className="mt-2 min-h-4 text-xs text-muted-foreground">{ingestState.step}</p>
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground tabular-nums">
                         <p>Visited: {liveIngestStats.visitedPages}</p>
                         <p>Queued: {liveIngestStats.queuedPages}</p>
                         <p>Pages with content: {liveIngestStats.pagesWithContent}</p>
@@ -528,23 +536,19 @@ export default function Page() {
                         <p>Total chunks: {liveIngestStats.totalChunks}</p>
                         <p>Indexed chunks: {liveIngestStats.insertedChunks}</p>
                       </div>
-                      {liveIngestStats.currentUrl && (
-                        <p className="mt-2 truncate text-[11px] text-muted-foreground" title={liveIngestStats.currentUrl}>
-                          Current URL: {liveIngestStats.currentUrl}
-                        </p>
-                      )}
-                      {liveIngestStats.mode && <p className="mt-1 text-[11px] text-muted-foreground">Scrape mode: {liveIngestStats.mode}</p>}
-                      {liveIngestStats.lastError && <p className="mt-1 text-[11px] text-destructive">Last crawl issue: {liveIngestStats.lastError}</p>}
-                      {recentIngestEvents.length > 0 && (
-                        <div className="mt-2 rounded-md border border-border/70 bg-muted/25 p-2">
-                          <p className="text-[11px] font-medium text-foreground">Recent activity</p>
-                          <ul className="mt-1 max-h-24 space-y-1 overflow-auto">
-                            {recentIngestEvents.map((event, index) => (
-                              <li className="text-[11px] text-muted-foreground" key={`${event}-${index}`}>{event}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
+                      <p className="mt-2 min-h-4 truncate text-[11px] text-muted-foreground" title={liveIngestStats.currentUrl ?? ''}>
+                        Current URL: {liveIngestStats.currentUrl ?? 'Waiting for crawl...' }
+                      </p>
+                      <p className="mt-1 min-h-4 text-[11px] text-muted-foreground">Scrape mode: {liveIngestStats.mode ?? '-'}</p>
+                      <p className="mt-1 min-h-4 text-[11px] text-destructive">Last crawl issue: {liveIngestStats.lastError ?? '-'}</p>
+                      <div className="mt-2 rounded-md border border-border/70 bg-muted/25 p-2">
+                        <p className="text-[11px] font-medium text-foreground">Recent activity</p>
+                        <ul className="mt-1 h-24 space-y-1 overflow-auto">
+                          {(recentIngestEvents.length > 0 ? recentIngestEvents : ['Waiting for ingest events...']).map((event, index) => (
+                            <li className="text-[11px] text-muted-foreground" key={`${event}-${index}`}>{event}</li>
+                          ))}
+                        </ul>
+                      </div>
                       {isIngesting && (
                         <div className="mt-2">
                           <Shimmer className="text-xs" duration={1.5}>{`Live update: ${ingestState.step} (${ingestState.progress}%)`}</Shimmer>
@@ -580,6 +584,32 @@ export default function Page() {
                         if (part.type !== 'text') return null
                         return <MessageResponse key={`${message.id}-${index}`}>{part.text}</MessageResponse>
                       })}
+
+                      {message.role === 'assistant' && message.id === latestAssistantMessageId && (message.metadata?.sources?.length ?? 0) > 0 && (
+                        <div className="mt-3 space-y-2">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            Relevant sources ({message.metadata?.sourceCount ?? message.metadata?.sources?.length ?? 0})
+                          </p>
+                          <div className="-mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:snap-none md:grid-cols-2 md:overflow-visible md:px-0 md:pb-0">
+                            {message.metadata?.sources?.map((source, index) => (
+                              <Card className="w-[min(82vw,22rem)] shrink-0 snap-start border border-border/70 bg-background/70 md:w-auto md:shrink" key={`${message.id}-source-${index}`} size="sm">
+                                <CardHeader className="space-y-1">
+                                  <CardTitle className="line-clamp-1 text-xs">{source.title}</CardTitle>
+                                  <CardDescription className="line-clamp-1 text-[11px]">
+                                    <a className="hover:underline" href={source.url} rel="noreferrer" target="_blank">
+                                      {source.url}
+                                    </a>
+                                  </CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-1">
+                                  <p className="line-clamp-3 text-[11px] text-muted-foreground">{source.excerpt}</p>
+                                  <p className="text-[11px] font-medium text-foreground/80">Score: {formatSourceScore(source.score)}</p>
+                                </CardContent>
+                              </Card>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </MessageContent>
                   </Message>
                 ))
