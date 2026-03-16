@@ -37,7 +37,7 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import type { IngestProgressEvent, IngestResult, IngestSourceSummary } from './api/rpc/[...path]/route'
 import { rpcClient } from '@/lib/orpc'
 import type { ChatUIMessage } from '@/types/chat'
@@ -372,7 +372,7 @@ export default function Page() {
 
   return (
     <div className="flex min-h-svh flex-col">
-      <header className="border-b border-border/70 bg-background/80 px-4 py-3 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-border/70 bg-background/80 px-4 py-3 backdrop-blur">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="rounded-lg bg-muted p-1.5 text-foreground">
@@ -397,8 +397,8 @@ export default function Page() {
                 </button>
               </DialogTrigger>
 
-              <DialogContent className="h-[88svh] w-full !max-w-[min(1100px,96vw)] overflow-hidden p-0" showCloseButton>
-                <div className="grid h-full lg:grid-cols-[1.2fr_1fr]">
+              <DialogContent className="max-h-[88svh] w-full !max-w-[min(1100px,96vw)] overflow-y-auto p-0 lg:h-[88svh] lg:overflow-hidden" showCloseButton>
+                <div className="grid min-h-full lg:h-full lg:grid-cols-[1.2fr_1fr]">
                   <section className="min-h-0 space-y-4 overflow-y-auto p-5">
                     <DialogHeader>
                       <DialogTitle className="text-lg">RAG Website Knowledge Panel</DialogTitle>
@@ -537,7 +537,7 @@ export default function Page() {
                         <p>Indexed chunks: {liveIngestStats.insertedChunks}</p>
                       </div>
                       <p className="mt-2 min-h-4 truncate text-[11px] text-muted-foreground" title={liveIngestStats.currentUrl ?? ''}>
-                        Current URL: {liveIngestStats.currentUrl ?? 'Waiting for crawl...' }
+                        Current URL: {liveIngestStats.currentUrl ?? 'Waiting for crawl...'}
                       </p>
                       <p className="mt-1 min-h-4 text-[11px] text-muted-foreground">Scrape mode: {liveIngestStats.mode ?? '-'}</p>
                       <p className="mt-1 min-h-4 text-[11px] text-destructive">Last crawl issue: {liveIngestStats.lastError ?? '-'}</p>
@@ -590,24 +590,32 @@ export default function Page() {
                           <p className="text-xs font-medium text-muted-foreground">
                             Relevant sources ({message.metadata?.sourceCount ?? message.metadata?.sources?.length ?? 0})
                           </p>
-                          <div className="-mx-1 flex snap-x snap-mandatory gap-2 overflow-x-auto px-1 pb-1 md:mx-0 md:grid md:snap-none md:grid-cols-2 md:overflow-visible md:px-0 md:pb-0">
+                          <Accordion className="rounded-lg border border-border/70 bg-background/70 px-2" collapsible defaultValue={`${message.id}-source-0`} type="single">
                             {message.metadata?.sources?.map((source, index) => (
-                              <Card className="w-[min(82vw,22rem)] shrink-0 snap-start border border-border/70 bg-background/70 md:w-auto md:shrink" key={`${message.id}-source-${index}`} size="sm">
-                                <CardHeader className="space-y-1">
-                                  <CardTitle className="line-clamp-1 text-xs">{source.title}</CardTitle>
-                                  <CardDescription className="line-clamp-1 text-[11px]">
-                                    <a className="hover:underline" href={source.url} rel="noreferrer" target="_blank">
-                                      {source.url}
+                              <AccordionItem className="border-border/70" key={`${message.id}-source-${index}`} value={`${message.id}-source-${index}`}>
+                                <AccordionTrigger className="gap-3 px-2 py-2.5 hover:no-underline">
+                                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                                    <span className="line-clamp-1 min-w-0 text-xs font-medium text-foreground">{source.title}</span>
+                                    <span className="shrink-0 rounded-full border border-border/70 bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                      {formatSourceScore(source.score)}
+                                    </span>
+                                  </div>
+                                </AccordionTrigger>
+
+                                <AccordionContent className="space-y-2 px-2 pb-3 pt-0">
+                                  <p className="line-clamp-4 text-[11px] text-muted-foreground">{source.excerpt}</p>
+                                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                    <a className="min-w-0 truncate text-muted-foreground hover:text-foreground hover:underline" href={source.url} rel="noreferrer" target="_blank" title={source.url}>
+                                      {getDomainLabel(source.url)}
                                     </a>
-                                  </CardDescription>
-                                </CardHeader>
-                                <CardContent className="space-y-1">
-                                  <p className="line-clamp-3 text-[11px] text-muted-foreground">{source.excerpt}</p>
-                                  <p className="text-[11px] font-medium text-foreground/80">Score: {formatSourceScore(source.score)}</p>
-                                </CardContent>
-                              </Card>
+                                    <a className="shrink-0 font-medium text-foreground/80 hover:underline" href={source.url} rel="noreferrer" target="_blank">
+                                      Open source
+                                    </a>
+                                  </div>
+                                </AccordionContent>
+                              </AccordionItem>
                             ))}
-                          </div>
+                          </Accordion>
                         </div>
                       )}
                     </MessageContent>
