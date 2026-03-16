@@ -1,5 +1,5 @@
 import { RPCHandler } from '@orpc/server/fetch'
-import { eventIterator, onError, os, withEventMeta } from '@orpc/server'
+import { eventIterator, onError, ORPCError, os, withEventMeta } from '@orpc/server'
 import { z } from 'zod'
 import { chromium } from 'playwright'
 import { JSDOM } from 'jsdom'
@@ -16,6 +16,7 @@ import { documentChunks } from '@/schema'
 const BATCH_SIZE = 50
 const CHUNK_SIZE = 10_000
 const CHUNK_OVERLAP = 500
+const EMBEDDING_DIMENSIONS = 512
 const MIN_HTML_LENGTH_FOR_FETCH_ONLY = 1200
 const FETCH_USER_AGENT = 'Mozilla/5.0 (compatible; TanStackStartRAGBot/1.0)'
 
@@ -28,6 +29,17 @@ const ingestInputSchema = z.object({
 
 const deleteInputSchema = z.object({
     rootUrl: normalizedUrlSchema,
+})
+
+const listIngestSourceSchema = z.object({
+    origin: z.string(),
+    rootUrl: z.string(),
+    pageUrls: z.array(z.string()),
+    visitedPages: z.number().int().nonnegative(),
+    pagesWithContent: z.number().int().nonnegative(),
+    totalChunks: z.number().int().nonnegative(),
+    insertedChunks: z.number().int().nonnegative(),
+    lastIndexedAt: z.string(),
 })
 
 const ingestProgressSchema = z.object({
@@ -65,6 +77,8 @@ const ingestResultSchema = z.object({
 
 type IngestProgressEvent = z.infer<typeof ingestProgressSchema>
 type IngestProgressPayload = Omit<IngestProgressEvent, 'timestamp' | 'counts'>
+type IngestResult = z.infer<typeof ingestResultSchema>
+type IngestSourceSummary = z.infer<typeof listIngestSourceSchema>
 
 type QueueItem = {
     url: string
@@ -194,13 +208,26 @@ function getFloatEmbeddings(response: EmbedByTypeResponse | { body: EmbedByTypeR
     throw new Error('Cohere response does not include float embeddings')
 }
 
+function resolveApiKey(...values: Array<string | undefined>) {
+    for (const value of values) {
+        const normalized = value?.trim()
+        if (normalized && !normalized.startsWith('$')) {
+            return normalized
+        }
+    }
+
+    return undefined
+}
+
 const ingest = os
     .input(ingestInputSchema)
     .output(eventIterator(ingestProgressSchema, ingestResultSchema))
     .handler(async function* ({ input, signal, lastEventId }) {
-        const cohereApiKey = process.env.COHERE_API_KEY
+        const cohereApiKey = resolveApiKey(process.env.cohere, process.env.COHERE_API_KEY)
         if (!cohereApiKey) {
-            throw new Error('COHERE_API_KEY is not set.')
+            throw new ORPCError('UNAUTHORIZED', {
+                message: 'Missing Cohere API key. Set COHERE_API_KEY or cohere in your environment.',
+            })
         }
 
         const normalizedRootUrl = input.rootUrl
@@ -270,6 +297,7 @@ const ingest = os
                 model: 'embed-v4.0',
                 inputType: 'search_document',
                 embeddingTypes: ['float'],
+                outputDimension: EMBEDDING_DIMENSIONS,
                 texts: batch.map((item) => item.chunkText),
             })
 
@@ -278,14 +306,20 @@ const ingest = os
                 throw new Error(`Embedding count mismatch. expected=${batch.length}, received=${embeddings.length}`)
             }
 
-            await db.insert(documentChunks).values(
-                batch.map((item, index) => ({
-                    parentUrl: item.parentUrl,
-                    pageTitle: item.pageTitle,
-                    chunkText: item.chunkText,
-                    embedding: embeddings[index],
-                })),
-            )
+            try {
+                await db.insert(documentChunks).values(
+                    batch.map((item, index) => ({
+                        parentUrl: item.parentUrl,
+                        pageTitle: item.pageTitle,
+                        chunkText: item.chunkText,
+                        embedding: embeddings[index],
+                    })),
+                )
+            } catch (error) {
+                throw new ORPCError('INTERNAL_SERVER_ERROR', {
+                    message: `Failed to store embedded chunks in database: ${error instanceof Error ? error.message : String(error)}`,
+                })
+            }
 
             insertedChunks += batch.length
             console.log(`[ingest] inserted ${batch.length} chunks (total=${insertedChunks})`)
@@ -400,7 +434,7 @@ const ingest = os
 
                 for (const chunkText of chunks) {
                     pendingChunks.push({
-                        parentUrl: current.parentUrl,
+                        parentUrl: current.url,
                         pageTitle,
                         chunkText,
                     })
@@ -514,10 +548,82 @@ const deleteIngest = os
         }
     })
 
+const listIngestSources = os
+    .output(z.array(listIngestSourceSchema))
+    .handler(async () => {
+        const rows = await db.execute<{
+            parent_url: string
+            chunk_count: number | string
+            last_indexed_at: string | Date | null
+        }>(sql`
+            SELECT
+                ${documentChunks.parentUrl} AS parent_url,
+                COUNT(*)::int AS chunk_count,
+                MAX(${documentChunks.createdAt}) AS last_indexed_at
+            FROM ${documentChunks}
+            GROUP BY ${documentChunks.parentUrl}
+            ORDER BY MAX(${documentChunks.createdAt}) DESC
+        `)
+
+        const byOrigin = new Map<string, {
+            rootUrl: string
+            pageUrls: string[]
+            totalChunks: number
+            lastIndexedAt: Date
+        }>()
+
+        for (const row of rows) {
+            const pageUrl = row.parent_url
+            const origin = new URL(pageUrl).origin
+            const chunkCount = typeof row.chunk_count === 'string'
+                ? Number.parseInt(row.chunk_count, 10)
+                : row.chunk_count
+
+            const parsedDate = row.last_indexed_at
+                ? new Date(row.last_indexed_at)
+                : new Date(0)
+
+            const existing = byOrigin.get(origin)
+            if (!existing) {
+                byOrigin.set(origin, {
+                    rootUrl: pageUrl,
+                    pageUrls: [pageUrl],
+                    totalChunks: chunkCount,
+                    lastIndexedAt: parsedDate,
+                })
+                continue
+            }
+
+            existing.totalChunks += chunkCount
+            if (!existing.pageUrls.includes(pageUrl)) {
+                existing.pageUrls.push(pageUrl)
+            }
+            if (parsedDate > existing.lastIndexedAt) {
+                existing.lastIndexedAt = parsedDate
+                existing.rootUrl = pageUrl
+            }
+        }
+
+        return [...byOrigin.entries()].map(([origin, source]) => ({
+            origin,
+            rootUrl: source.rootUrl,
+            pageUrls: source.pageUrls,
+            visitedPages: source.pageUrls.length,
+            pagesWithContent: source.pageUrls.length,
+            totalChunks: source.totalChunks,
+            insertedChunks: source.totalChunks,
+            lastIndexedAt: source.lastIndexedAt.toISOString(),
+        }))
+    })
+
 export const router = {
     ingest,
     deleteIngest,
+    listIngestSources,
 }
+
+export type AppRouter = typeof router
+export type { IngestProgressEvent, IngestResult, IngestSourceSummary }
 
 const handler = new RPCHandler(router, {
     interceptors: [
