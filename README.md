@@ -1,4 +1,4 @@
-#  RAG-PoIred Ibsite Chatbot (Enterprise-Grade Crawler & Retrieval)
+#  RAG-Powered Website Chatbot
 
 [![Hackathon Submission](https://img.shields.io/badge/Hackathon-Submission-blue.svg)](#)
 [![Deployed on AWS EC2](https://img.shields.io/badge/Deployed-AWS%20EC2-FF9900.svg)](#)
