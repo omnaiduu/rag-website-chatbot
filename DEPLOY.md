@@ -208,16 +208,30 @@ Do not commit this token to any file in the repository.
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$GHCR_OWNER" --password-stdin
 ```
 
-### Step 4: Build and tag for GHCR
+### Step 4: Build and tag for GHCR (multi-arch: AMD64 + ARM64)
+
+Initialize buildx once (if not already configured):
 
 ```bash
-docker build \
+docker buildx create --name multiarch-builder --use || docker buildx use multiarch-builder
+docker buildx inspect --bootstrap
+```
+
+Build and push a multi-architecture image manifest:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
   -t ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:$GHCR_TAG \
   -t ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:latest \
+  --push \
   .
 ```
 
 ### Step 5: Push to GHCR
+
+If you used `docker buildx build ... --push` in Step 4, this step is already done.
+You can skip it.
 
 ```bash
 docker push ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:$GHCR_TAG
@@ -246,8 +260,17 @@ docker run -d \
   ghcr.io/$GHCR_OWNER/$GHCR_IMAGE:latest
 ```
 
+If you still need to force architecture manually, add:
+
+```bash
+--platform linux/arm64
+```
+
+to `docker run`.
+
 ## Notes
 
 - Container listens on port 5000 (`PORT=5000` in `Dockerfile`).
 - App environment variables are injected at runtime from `.env`.
 - Never commit `.env` to git.
+- For ARM production machines, publish and pull multi-arch images (`linux/amd64,linux/arm64`) using buildx.
